@@ -267,7 +267,7 @@ bool SpectrumAnalyzerWindow::update()
 
 		// Update returns 'true' if activation value changed
 		if(filter->Update(m_audio_sampler->GetMagnitudeArray(), m_audio_sampler->GetMagnitudeCount())) {
-			snprintf(address_buffer, ADDRESS_BUFFER_SIZE, "Spectrum Analyzer %02d / %s", m_spectrum_analyzer_number, filter->GetName());
+			snprintf(address_buffer, ADDRESS_BUFFER_SIZE, "/spectrum-analyzer/%02d/%s", m_spectrum_analyzer_number, filter->GetName());
 			send_float_packet(address_buffer, filter->GetActivation());
 		}
 	}
