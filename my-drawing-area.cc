@@ -1,68 +1,56 @@
 #include "my-drawing-area.h"
-#include <GL/glu.h>
+
+#include <epoxy/gl.h>
+#include "gl-compat.h"
 
 MyDrawingArea::MyDrawingArea()
 {
-	Glib::RefPtr<Gdk::GL::Config> glconfig;
-	glconfig = Gdk::GL::Config::create(Gdk::GL::MODE_RGB | Gdk::GL::MODE_DEPTH | Gdk::GL::MODE_DOUBLE);
-	set_gl_capability(glconfig);
+	// Gtk::GLArea only supports OpenGL 3.2+ core profiles, so we request a
+	// modern context and render through glc (a small fixed-function shim).
+	set_required_version(3, 2);
 }
 
 MyDrawingArea::~MyDrawingArea()
 {
 }
 
-void MyDrawingArea::gl_begin()
-{
-	Glib::RefPtr<Gdk::GL::Window> glwindow = get_gl_window();
-	glwindow->gl_begin(get_gl_context());
-}
-
-void MyDrawingArea::gl_end()
-{
-	Glib::RefPtr<Gdk::GL::Window> glwindow = get_gl_window();
-	glwindow->gl_end();
-	glwindow->swap_buffers();
-}
-
 void MyDrawingArea::trigger_redraw()
 {
-	get_window()->invalidate(true);
+	queue_draw();
 }
 
-bool MyDrawingArea::on_configure_event(GdkEventConfigure* event)
+void MyDrawingArea::on_realize()
 {
-	Glib::RefPtr<Gdk::GL::Window> glwindow = get_gl_window();
-	glwindow->gl_begin(get_gl_context());
+	Gtk::GLArea::on_realize();
 
-	Gtk::Allocation allocation = get_allocation();
-	int width = allocation.get_width();
-	int height = allocation.get_height();
+	make_current();
 
-	// Default options
+	glc::init();
+
+	// One-time OpenGL state.
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glClearColor(0.05, 0.05, 0.05, 1.0);
+	glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+}
 
-	// Default view
+void MyDrawingArea::on_resize(int width, int height)
+{
+	Gtk::GLArea::on_resize(width, height);
+
+	if (width <= 0 || height <= 0)
+		return;
+
+	make_current();
+
 	glViewport(0, 0, width, height);
 
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	gluPerspective(90.0f, (GLfloat)width/(GLfloat)height, 0.1f, 100.0f);	// Calculate The Aspect Ratio Of The Window
-	gluLookAt(
-		0.0, 0.0, 0.5,		// position
-		0.0, 0.0, 0.0,		// looking at
-		0.0, 1.0, 0.0			// up
-	);
+	// The original code used a 90 degree perspective + lookAt + modelview
+	// scale, which together reduced to a plain 2x orthographic mapping of
+	// the [-0.5, 0.5] x [-0.5, 0.5] world square onto the widget.
+	glc::matrix_mode(glc::MATRIX_PROJECTION);
+	glc::load_identity();
+	glc::ortho(-0.5f, 0.5f, -0.5f, 0.5f);
 
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-
-	// Rendering should fill screen/window completely, regardless of dimensions
-	glScalef((float)width / (float)height, 1.0, 1.0);
-
-	glwindow->gl_end();
-
-	return true;
+	glc::matrix_mode(glc::MATRIX_MODELVIEW);
+	glc::load_identity();
 }

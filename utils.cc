@@ -1,16 +1,7 @@
 #include <gtkmm.h>
 #include <math.h>
-#include <GL/gl.h>
 
-float average_of_floats(const float* floats, int count)
-{
-	int i;
-	float total = 0.0;
-	for(i=0 ; i<count ; i++) {
-		total += fabs(floats[i]);
-	}
-	return total / count;
-}
+#include "gl-compat.h"
 
 float clamp(float value, float min, float max)
 {
@@ -49,8 +40,8 @@ float overlap_2D(float a, float b, float c, float d)
 
 void render_unit_square()
 {
-	glVertex2f(-0.5, 0.5);
-	glVertex2f( 0.5, 0.5);
-	glVertex2f( 0.5, -0.5);
-	glVertex2f(-0.5, -0.5);
+	glc::vertex2f(-0.5, 0.5);
+	glc::vertex2f( 0.5, 0.5);
+	glc::vertex2f( 0.5, -0.5);
+	glc::vertex2f(-0.5, -0.5);
 }

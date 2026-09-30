@@ -1,17 +1,25 @@
+#ifndef __MY_DRAWING_AREA_H__
+#define __MY_DRAWING_AREA_H__
+
 #include <gtkmm.h>
-#include <gtkmm/gl/drawingarea.h>
 
-class MyDrawingArea : public Gtk::GL::DrawingArea
+// OpenGL drawing surface.
+//
+// This replaces the old gtkglextmm Gtk::GL::DrawingArea with a Gtk::GLArea,
+// which is built into GTK 3.  The actual scene is drawn by
+// SpectrumAnalyzerWindow via the signal_render() callback.
+class MyDrawingArea : public Gtk::GLArea
 {
-	public:
-		MyDrawingArea();
-		virtual ~MyDrawingArea();
-		bool on_timer();
+public:
+	MyDrawingArea();
+	virtual ~MyDrawingArea();
 
-		void gl_begin();
-		void gl_end();
-		void trigger_redraw();
+	// Schedule a repaint of the OpenGL contents.
+	void trigger_redraw();
 
-	protected:
-		virtual bool on_configure_event(GdkEventConfigure* event);
+protected:
+	virtual void on_realize() override;
+	virtual void on_resize(int width, int height) override;
 };
+
+#endif

@@ -1,0 +1,37 @@
+/* Spectrum Analyzer - dark theme (GTK3 CSS) */
+
+window,
+dialog {
+	background-color: #1a1e20;
+	color: #e6cccc;
+}
+
+box,
+toolbar {
+	background-color: #1a1e20;
+}
+
+button {
+	background-image: none;
+	background-color: #333333;
+	border: 1px solid #111111;
+	color: #e6e6e6;
+}
+
+button:hover {
+	background-color: #336633;
+}
+
+button:checked {
+	background-color: #336633;
+}
+
+checkbutton {
+	color: #e6e6e6;
+}
+
+spinbutton,
+entry {
+	background-color: #272a2f;
+	color: #e6e6e6;
+}

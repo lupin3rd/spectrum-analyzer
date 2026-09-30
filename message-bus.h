@@ -6,8 +6,8 @@
 //
 #include <lo/lo.h>
 
-#define DEFAULT_UDP_SEND_PORT ("10007")				// LOOOZ :D
-#define DEFAULT_UDP_RECEIVE_PORT (10008)		// currently nothing is received at this address, it just has to be different than the send port (or liblo init fails)
+#define DEFAULT_OSC_HOST ("localhost")
+#define DEFAULT_OSC_PORT ("10007")
 
 class MessageBus
 {
@@ -15,19 +15,14 @@ public:
 	MessageBus();
 	virtual ~MessageBus();
 
-	void set_broadcast(bool broadcast);
+	// Set the destination (IP/host and UDP port) of the outgoing OSC messages.
+	void set_destination(const char* host, const char* port);
 
 	void send_int(const char* address, int value);
 	void send_float(const char* address, float value);
 
 private:
-	lo_server m_server;
-
-	lo_address m_address_local;
-	lo_address m_address_broadcast;
-
-	bool m_broadcast;
+	lo_address m_address;
 };
 
 #endif
-

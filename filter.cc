@@ -1,7 +1,9 @@
 #include "filter.h"
 
-#include <GL/gl.h>	// Header File For The OpenGL32 Library
+#include <epoxy/gl.h>	// Header File For The OpenGL32 Library
 #include <math.h>
+
+#include "gl-compat.h"
 
 #define MIN_WIDTH (0.05)
 #define MAX_WIDTH (1.0)
@@ -43,59 +45,57 @@ Filter::~Filter()
 
 void Filter::Render(void)
 {
-	glPushMatrix();
+	glc::push_matrix();
 
 	// Position and scale filter so the drawing code can pretend it's always 1x1
-	glTranslatef(m_x, m_y, 0.0);
-		glPushMatrix();
-			glScalef(m_width, m_height, 1.0);
+	glc::translate(m_x, m_y);
+		glc::push_matrix();
+			glc::scale(m_width, m_height);
 
 			// Background
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE);		// additive
-			glColor4f(m_red, m_green, m_blue, 0.6);
-			glBegin(GL_QUADS);
+			glc::color4f(m_red, m_green, m_blue, 0.6);
+			glc::begin(GL_QUADS);
 				render_unit_square();
-			glEnd();
+			glc::end();
 
 			// Border
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			glColor4f(1.0, 1.0, 1.0, 0.2);
-			glBegin(GL_LINE_LOOP);
+			glc::color4f(1.0, 1.0, 1.0, 0.2);
+			glc::begin(GL_LINE_LOOP);
 				render_unit_square();
-			glEnd();
+			glc::end();
 
 			// Quadrant lines
 			if(m_hover) {
-				glBegin(GL_LINES);
-					glVertex2f(0.0, -0.5); glVertex2f(0, 0.5);
-					glVertex2f(-0.5, 0.0); glVertex2f(0.5, 0.0);
-				glEnd();
+				glc::begin(GL_LINES);
+					glc::vertex2f(0.0, -0.5); glc::vertex2f(0, 0.5);
+					glc::vertex2f(-0.5, 0.0); glc::vertex2f(0.5, 0.0);
+				glc::end();
 			}
-		glPopMatrix();
+		glc::pop_matrix();
 
 		// Here we are centered on the filter but not scaled, so we have pixel precision
-		//glTranslatef((filter->width / 2.0) + 0.012, 0.0, 0.0);
+		//glc::translate((filter->width / 2.0) + 0.012, 0.0);
 
 		// Draw Activation bar
 		float half_height = (m_height / 2.0);
 		float half_width = (m_width / 2.0);
 
-//		glLineWidth(8.0);
-		glBegin(GL_QUADS);
-			glColor4f(0.0, 0.0, 0.0, 0.9);
-			glVertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
-			glVertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
-			glVertex3f(half_width * 0.333,  (-half_height + (m_height)) * 0.333, 0.0);
-			glVertex3f(half_width * -0.333, (-half_height + (m_height)) * 0.333, 0.0);
+		glc::begin(GL_QUADS);
+			glc::color4f(0.0, 0.0, 0.0, 0.9);
+			glc::vertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
+			glc::vertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
+			glc::vertex3f(half_width * 0.333,  (-half_height + (m_height)) * 0.333, 0.0);
+			glc::vertex3f(half_width * -0.333, (-half_height + (m_height)) * 0.333, 0.0);
 
-			glColor4f(1.0, 1.0, 1.0, 0.8);
-			glVertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
-			glVertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
-			glVertex3f(half_width * 0.333,  (-half_height + (m_height * m_activation)) * 0.333, 0.0);
-			glVertex3f(half_width * -0.333, (-half_height + (m_height * m_activation)) * 0.333, 0.0);
-		glEnd();
-//		glLineWidth(1.0);
-	glPopMatrix();
+			glc::color4f(1.0, 1.0, 1.0, 0.8);
+			glc::vertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
+			glc::vertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
+			glc::vertex3f(half_width * 0.333,  (-half_height + (m_height * m_activation)) * 0.333, 0.0);
+			glc::vertex3f(half_width * -0.333, (-half_height + (m_height * m_activation)) * 0.333, 0.0);
+		glc::end();
+	glc::pop_matrix();
 }
 
 bool Filter::Update(float* bar_magnitudes, int num_bars)
@@ -139,7 +139,7 @@ bool Filter::PointerPress(int button, float x, float y)
 		return false;
 
 	// Center square (or second/third mouse button) is a drag
-	if(button != 1 || (fabs((float)m_x - (float)x) < (m_width / 6.0)) && (fabs((float)m_y - (float)y) < (m_height / 6.0))) {
+	if(button != 1 || ((fabs((float)m_x - (float)x) < (m_width / 6.0)) && (fabs((float)m_y - (float)y) < (m_height / 6.0)))) {
 		m_grabbed_move = true;
 	}
 	else {
