@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #include "my-drawing-area.h"
 
 #include <epoxy/gl.h>
@@ -29,8 +31,21 @@ void MyDrawingArea::on_realize()
 
 	// One-time OpenGL state.
 	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glc::blend_alpha();
 	glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+}
+
+void MyDrawingArea::on_unrealize()
+{
+	// The GL objects belong to the context that created them; release them
+	// while the context is still current, otherwise a re-realize leaves glc
+	// pointing at dead ids.
+	if (get_realized()) {
+		make_current();
+		glc::shutdown();
+	}
+
+	Gtk::GLArea::on_unrealize();
 }
 
 void MyDrawingArea::on_resize(int width, int height)

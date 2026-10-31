@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# macOS build of the portable front end.
+#
+# Kept in a separate workflow because the release job in ci.yml waits only for
+# Linux and Windows: this one uploads its own artifact to the release when it
+# gets there, so a slow or unavailable macOS runner can never hold the release
+# hostage.
+#
+# Runner label: `macos-latest` works; the pinned `macos-14` and `macos-13`
+# labels did not exist on the first attempts (macos-14 was cancelled one second
+# after the job was created, macos-13 never started).
+#
+# Only arm64 is built: GitHub has been retiring its Intel macOS runners, and an
+# x86_64 binary cannot be produced from an arm64 runner without building every
+# dependency as a universal binary.  Intel Macs can build from source.
+#
+# The .app is ad-hoc signed by the linker.  For distribution to other people it
+# must be signed and notarized (codesign + notarytool, Apple Developer account):
+# until then macOS requires a right-click -> Open on first launch.
+
+name: macos
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to attach the zip to the release
+
+jobs:
+  macos:
+    name: macos arm64
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install dependencies
+        run: brew install sdl3 fftw liblo pkgconf dylibbundler
+
+      - name: test (headless core)
+        run: make test
+
+      - name: build and bundle
+        run: ./packaging/build-macos-app.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectrum-analyzer-macos-arm64
+          path: "*.zip"
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The build workflow creates the release and both start from the same
+          # tag, so wait for it instead of failing the upload.
+          for _ in $(seq 1 40); do
+            if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" ./*.zip --repo "$GITHUB_REPOSITORY" --clobber
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::warning::release $GITHUB_REF_NAME not found; the zip stays on this workflow run"

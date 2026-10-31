@@ -1,104 +1,41 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #include "filter.h"
 
-#include <epoxy/gl.h>	// Header File For The OpenGL32 Library
 #include <math.h>
 
-#include "gl-compat.h"
+#include "math-utils.h"
 
 #define MIN_WIDTH (0.05)
 #define MAX_WIDTH (1.0)
 #define MIN_HEIGHT (0.05)
 #define MAX_HEIGHT (1.0)
 
-#include "utils.h"
-
-Filter::Filter(float x, float y, char* name, float r, float g, float b)
+Filter::Filter(float x, float y, const std::string& name, float r, float g, float b)
+	: m_x(x),
+		m_y(y),
+		m_name(name),
+		m_red(r),
+		m_green(g),
+		m_blue(b),
+		m_width(0.15),
+		m_height(0.15),
+		m_hover(false),
+		m_grabbed_move(false),
+		m_grabbed_up(false),
+		m_grabbed_down(false),
+		m_grabbed_right(false),
+		m_grabbed_left(false),
+		m_activation(0.0),
+		m_previous_activation(0.0)
 {
-	m_x = x;
-	m_y = y;
-
-	m_red = r;
-	m_green = g;
-	m_blue = b;
-
-	m_name = name;
-
-	m_width = 0.15;
-	m_height = 0.15;
-	m_hover = false;
-
-	m_grabbed_move = false;
-	m_grabbed_up = false;
-	m_grabbed_down = false;
-	m_grabbed_right = false;
-	m_grabbed_left = false;
-
-
-	m_activation = 0.0;
-	m_previous_activation = 0.0;
 }
 
 Filter::~Filter()
 {
-
 }
 
-void Filter::Render(void)
-{
-	glc::push_matrix();
-
-	// Position and scale filter so the drawing code can pretend it's always 1x1
-	glc::translate(m_x, m_y);
-		glc::push_matrix();
-			glc::scale(m_width, m_height);
-
-			// Background
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE);		// additive
-			glc::color4f(m_red, m_green, m_blue, 0.6);
-			glc::begin(GL_QUADS);
-				render_unit_square();
-			glc::end();
-
-			// Border
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			glc::color4f(1.0, 1.0, 1.0, 0.2);
-			glc::begin(GL_LINE_LOOP);
-				render_unit_square();
-			glc::end();
-
-			// Quadrant lines
-			if(m_hover) {
-				glc::begin(GL_LINES);
-					glc::vertex2f(0.0, -0.5); glc::vertex2f(0, 0.5);
-					glc::vertex2f(-0.5, 0.0); glc::vertex2f(0.5, 0.0);
-				glc::end();
-			}
-		glc::pop_matrix();
-
-		// Here we are centered on the filter but not scaled, so we have pixel precision
-		//glc::translate((filter->width / 2.0) + 0.012, 0.0);
-
-		// Draw Activation bar
-		float half_height = (m_height / 2.0);
-		float half_width = (m_width / 2.0);
-
-		glc::begin(GL_QUADS);
-			glc::color4f(0.0, 0.0, 0.0, 0.9);
-			glc::vertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
-			glc::vertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
-			glc::vertex3f(half_width * 0.333,  (-half_height + (m_height)) * 0.333, 0.0);
-			glc::vertex3f(half_width * -0.333, (-half_height + (m_height)) * 0.333, 0.0);
-
-			glc::color4f(1.0, 1.0, 1.0, 0.8);
-			glc::vertex3f(half_width * -0.333, (-half_height * 0.333), 0.0);
-			glc::vertex3f(half_width * 0.333,  (-half_height * 0.333), 0.0);
-			glc::vertex3f(half_width * 0.333,  (-half_height + (m_height * m_activation)) * 0.333, 0.0);
-			glc::vertex3f(half_width * -0.333, (-half_height + (m_height * m_activation)) * 0.333, 0.0);
-		glc::end();
-	glc::pop_matrix();
-}
-
-bool Filter::Update(float* bar_magnitudes, int num_bars)
+bool Filter::Update(const float* bar_magnitudes, int num_bars)
 {
 	float x1 = 0.5+m_x - m_width / 2.0;
 	float y1 = 0.5+m_y - m_height / 2.0;
@@ -118,25 +55,16 @@ bool Filter::Update(float* bar_magnitudes, int num_bars)
 	return (m_activation != m_previous_activation);
 }
 
-float Filter::Area()
-{
-	return (m_width * m_height);
-}
-
-float Filter::GetActivation()
-{
-	return m_activation;
-}
-
-char* Filter::GetName()
-{
-	return m_name;
-}
-
 bool Filter::PointerPress(int button, float x, float y)
 {
-	if(m_hover == false)
+	// Hit test here instead of trusting a previous PointerMovement: a click can
+	// arrive without any motion (pointer already inside the box when the window
+	// gets focus, touch input, synthetic events).
+	if (!HitTest(x, y)) {
+		m_hover = false;
 		return false;
+	}
+	m_hover = true;
 
 	// Center square (or second/third mouse button) is a drag
 	if(button != 1 || ((fabs((float)m_x - (float)x) < (m_width / 6.0)) && (fabs((float)m_y - (float)y) < (m_height / 6.0)))) {
@@ -179,13 +107,18 @@ void Filter::PointerMovement(float x, float y, float delta_x, float delta_y)
 	m_hover = HitTest(x, y);
 }
 
-bool Filter::HitTest(float x, float y)
+bool Filter::HitTest(float x, float y) const
 {
 	return ((fabs((float)m_x - (float)x) < (m_width / 2.0)) && (fabs((float)m_y - (float)y) < (m_height / 2.0)));
 }
 
 void Filter::PointerRelease(int button, float x, float y)
 {
+	// A release ends any interaction regardless of which button it was.
+	(void)button;
+	(void)x;
+	(void)y;
+
 	m_grabbed_move = false;
 	m_grabbed_up = false;
 	m_grabbed_down = false;

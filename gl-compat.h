@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #ifndef __GL_COMPAT_H__
 #define __GL_COMPAT_H__
 
@@ -17,10 +19,26 @@ enum MatrixMode {
 };
 
 // One-time initialisation.  Must be called with a current GL context.
+// Safe to call again (e.g. after the context was rebuilt): the GL objects are
+// recreated if the current context no longer knows about them.
 void init();
+
+// Release the GL objects.  Call with a current context before it is destroyed
+// (Gtk::GLArea::on_unrealize) so nothing leaks on context teardown.
+void shutdown();
 
 // Clear with a colour (replaces glClearColor + glClear).
 void clear(float r, float g, float b, float a);
+
+// Explicit blend modes.  The draw code used to rely on the blend state left
+// behind by whatever had been drawn last, which made the result depend on draw
+// order.  Every primitive now states what it needs.
+void blend_alpha();      // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+void blend_additive();   // GL_SRC_ALPHA, GL_ONE
+
+// Log any pending GL error, prefixed with `where`.  Cheap enough to call once
+// per frame while developing; compiled out with NDEBUG.
+void check_errors(const char* where);
 
 // Matrix stack.
 void matrix_mode(MatrixMode mode);

@@ -1,3 +1,10 @@
 *.o
 *.d
 spectrum-analyzer
+spectrum-analyzer-asan
+spectrum-analyzer-sdl
+tests/dsp-test
+tests/filter-test
+.cache/
+*.AppImage
+*.AppDir/

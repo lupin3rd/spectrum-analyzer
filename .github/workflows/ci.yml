@@ -1,0 +1,169 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Build and package the portable (SDL3) front end on Linux, Windows and macOS,
+# plus the GTK front end and the headless test suites on Linux.
+#
+# The Linux job runs inside debian:trixie because that is the distribution that
+# packages SDL3 (libsdl3-dev); Ubuntu LTS does not, and building SDL3 from source
+# on every run would cost five minutes for nothing.  Node.js is installed in the
+# container because JavaScript actions (checkout, upload-artifact) execute inside
+# it.
+#
+# Windows and macOS build the SDL front end only: gtkmm is not usable there
+# (GTK 3's GtkGLArea does not work on macOS at all, see
+# docs/CROSS-PLATFORM.md).
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: both front ends, the test suites, and an AppImage.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: linux x86_64
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: install build environment
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config make \
+            libfftw3-dev liblo-dev libsdl3-dev \
+            libgtkmm-3.0-dev libepoxy-dev \
+            git curl ca-certificates nodejs file
+      - uses: actions/checkout@v5
+
+      - name: build GTK front end
+        run: make -j"$(nproc)"
+
+      - name: build SDL front end
+        run: make sdl -j"$(nproc)"
+
+      - name: test
+        run: make test
+
+      - name: build AppImage
+        run: make appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectrum-analyzer-linux-x86_64
+          path: "*.AppImage"
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Windows: a single .exe when the static link works, otherwise the .exe with
+  # the DLLs it needs.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: windows x86_64 (MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-fftw
+            mingw-w64-ucrt-x86_64-liblo
+            make
+            zip
+
+      - name: test (headless core)
+        run: make test
+
+      - name: build
+        run: |
+          # A fully static link is not possible with the MSYS2 packages: liblo
+          # ships only a DLL import library (`ld` reports "have you installed
+          # the static version of the lo library?"), so the executable is built
+          # dynamically and its dependencies are collected next to it.
+          make sdl -j"$(nproc)"
+
+          mkdir -p dist
+          cp spectrum-analyzer-sdl.exe dist/
+          cp LICENSE vendor/miniaudio-LICENSE dist/
+
+          # Collect the non-system DLLs the executable needs, transitively,
+          # instead of guessing: picking them by glob drags in all four FFTW
+          # precisions plus their OpenMP and threading variants (13 MB for
+          # 450 kB of executable).
+          todo="dist/spectrum-analyzer-sdl.exe"
+          while [ -n "$todo" ]; do
+            found=""
+            for f in $todo; do
+              for dll in $(ldd "$f" 2>/dev/null | awk '/=> \/ucrt64/ {print $3}'); do
+                base=$(basename "$dll")
+                if [ ! -f "dist/$base" ]; then
+                  cp "$dll" dist/
+                  found="$found dist/$base"
+                fi
+              done
+            done
+            todo="$found"
+          done
+
+          echo "== bundled =="
+          ls -la dist
+
+          # Ship one archive: the release job attaches files by extension, and a
+          # lone .exe without its DLLs would not run.
+          (cd dist && zip -q -r ../spectrum-analyzer-windows-x86_64.zip .)
+          ls -la spectrum-analyzer-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spectrum-analyzer-windows-x86_64
+          path: spectrum-analyzer-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Publishing: pushing a v* tag attaches every artifact to a GitHub release.
+  # Nothing is published on a branch push.
+  # ---------------------------------------------------------------------------
+  release:
+    name: release
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: show what will be published
+        run: find artifacts -type f | sort
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Spectrum Analyzer $TAG" \
+            --generate-notes \
+            $(find artifacts -type f \( -name '*.AppImage' -o -name '*.exe' -o -name '*.zip' \))

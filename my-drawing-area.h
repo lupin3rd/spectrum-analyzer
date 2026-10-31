@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #ifndef __MY_DRAWING_AREA_H__
 #define __MY_DRAWING_AREA_H__
 
@@ -19,6 +21,8 @@ public:
 
 protected:
 	virtual void on_realize() override;
+	// Release the GL objects while the context is still alive.
+	virtual void on_unrealize() override;
 	virtual void on_resize(int width, int height) override;
 };
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Spectrum Analyzer
+GenericName=Audio Spectrum Analyzer
+Comment=Real-time audio spectrum analyzer with OSC output
+Exec=spectrum-analyzer
+Icon=spectrum-analyzer
+Terminal=false
+Categories=AudioVideo;Audio;Graphics;
+Keywords=spectrum;analyzer;audio;osc;fft;vj;
