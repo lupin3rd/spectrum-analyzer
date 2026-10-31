@@ -159,6 +159,10 @@ static bool open_audio_device()
 	if (g_audio_sampler->IsOpen())
 		return true;
 
+	// Accept a device name as well as an id: the name is what --list-sources
+	// prints, and it is what people type.
+	g_device = resolve_audio_source(g_device);
+
 	if (g_audio_sampler->Open(g_device))
 		return true;
 

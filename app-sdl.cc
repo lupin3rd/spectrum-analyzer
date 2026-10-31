@@ -224,9 +224,15 @@ bool App::init(const std::string& device)
 	m_audio.reset(new AudioSampler());
 
 	m_sources = AudioSampler::EnumerateSources();
-	for (size_t i = 0; i < m_sources.size(); i++) {
-		if (!m_source_argument.empty() && m_sources[i].id == m_source_argument)
-			m_source_index = (int)i;
+
+	// The command line accepts an id or a name; resolving it against the
+	// enumeration also tells us which entry to select in the drop-down.
+	if (!m_source_argument.empty()) {
+		m_source_argument = resolve_audio_source(m_source_argument);
+		for (size_t i = 0; i < m_sources.size(); i++) {
+			if (!m_source_argument.empty() && m_sources[i].id == m_source_argument)
+				m_source_index = (int)i;
+		}
 	}
 
 	const std::string source = (m_sources.empty() || m_source_index == 0) ? m_source_argument : m_sources[(size_t)m_source_index].id;

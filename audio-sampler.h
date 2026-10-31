@@ -25,6 +25,15 @@ struct AudioSourceInfo
 	bool is_monitor;         // true for "Monitor of ..." sources
 };
 
+// Turn what the user typed on the command line into a device id.
+//
+// The ids miniaudio uses are opaque blobs (hex-encoded, see audio-sampler.cc),
+// so the name that --list-sources prints next to an id is what people will
+// paste.  Accepts, in order: an exact id, an exact description, or a
+// case-insensitive substring of a description.  Returns the argument unchanged
+// when nothing matches, so the caller still reports a sensible error.
+std::string resolve_audio_source(const std::string& argument);
+
 class AudioSampler
 {
 public:

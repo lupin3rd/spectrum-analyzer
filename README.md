@@ -5,7 +5,7 @@ macOS.
 
 ![Spectrum Analyzer running](screenshot.png)
 
-*The GTK front end on Linux.*
+*The SDL front end — the one in the downloads — following what is playing.*
 
 Analyses what is playing (or what the microphone hears) in log-spaced bands from
 20 Hz to 20 kHz, and streams the level of four draggable boxes over OSC so that
@@ -29,6 +29,8 @@ installed.  Intel Macs and other architectures can build from source.
     spectrum-analyzer                        # default capture source
     spectrum-analyzer --list-sources         # list capture sources and exit
     spectrum-analyzer <source>               # capture from a specific source
+                                             #   (an id from --list-sources, or
+                                             #    any part of its name)
     spectrum-analyzer --version
 
 Pick the capture device from the `Source:` list — on PulseAudio/PipeWire the
@@ -162,6 +164,13 @@ history and the coding-agent transcripts; see
 - [`docs/AUDIT.md`](docs/AUDIT.md) — code audit: fixed defects, open decisions.
 - [`docs/CROSS-PLATFORM.md`](docs/CROSS-PLATFORM.md) — what the port required.
 - [`vendor/README.md`](vendor/README.md) — the vendored audio library.
+
+## Support
+
+Spectrum Analyzer is free and GPL-3.0. If it is useful to you, you can buy me a
+coffee — a thank-you, never a requirement.
+
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/lupin3rd)
 
 ## License
 

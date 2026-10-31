@@ -5,6 +5,7 @@
 #include "miniaudio.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -255,6 +256,44 @@ std::vector<AudioSourceInfo> AudioSampler::EnumerateSources()
 
 	ma_context_uninit(&context);
 	return sources;
+}
+
+std::string resolve_audio_source(const std::string& argument)
+{
+	if (argument.empty())
+		return argument;
+
+	const std::vector<AudioSourceInfo> sources = AudioSampler::EnumerateSources();
+
+	// 1) an id, as printed by --list-sources.
+	for (std::size_t i = 0; i < sources.size(); i++) {
+		if (!sources[i].id.empty() && sources[i].id == argument)
+			return argument;
+	}
+
+	// 2) the exact description.
+	for (std::size_t i = 0; i < sources.size(); i++) {
+		if (sources[i].description == argument)
+			return sources[i].id;
+	}
+
+	// 3) a substring of a description, case-insensitively, so
+	//    "spectrum-analyzer monitor" or "Speaker" is enough.
+	std::string needle = argument;
+	for (std::size_t i = 0; i < needle.size(); i++)
+		needle[i] = (char)tolower((unsigned char)needle[i]);
+
+	for (std::size_t i = 0; i < sources.size(); i++) {
+		std::string haystack = sources[i].description;
+		for (std::size_t j = 0; j < haystack.size(); j++)
+			haystack[j] = (char)tolower((unsigned char)haystack[j]);
+		if (!haystack.empty() && haystack.find(needle) != std::string::npos)
+			return sources[i].id;
+	}
+
+	fprintf(stderr, "AudioSampler: no capture device matches '%s'; using it as an id\n",
+		argument.c_str());
+	return argument;
 }
 
 bool AudioSampler::Open(const std::string& source_name)

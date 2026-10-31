@@ -5,6 +5,23 @@ All notable changes to this project, newest first.  Versions follow
 bump means "the product changed shape" (a front end removed or replaced), not
 "an API broke".
 
+## [1.1.2] — 2026-10-31
+
+### Fixed
+
+- `spectrum-analyzer <source>` only accepted the opaque hex device id, so the
+  name that `--list-sources` prints as a description was rejected with
+  "malformed device id" and the program silently fell back to the default
+  device.  The argument is now resolved against the enumeration: an exact id, an
+  exact description, or a case-insensitive substring of one.  The SDL front end
+  also selects the resolved device in the drop-down.
+
+### Changed
+
+- **New screenshot** of the SDL front end, the one the downloads contain.
+- **Support section**: the project is free and GPL-3.0, with a Buy Me a Coffee
+  link for anyone who wants to say thank you.
+
 ## [1.1.1] — 2026-10-31
 
 Documentation and packaging only: no code changes.
@@ -117,6 +134,7 @@ Modernized and improved fork of [luz](https://github.com/lighttroupe/luz):
 ported to GTK 3 and modern OpenGL, low-latency PulseAudio/ALSA capture,
 log-spaced analysis from 20 Hz to 20 kHz, OSC output.
 
+[1.1.2]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...v1.1.0
 [1.0.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...1.x
