@@ -77,7 +77,7 @@ un requisito, la Strada B non è una scorciatoia, è un vicolo cieco.
 | 2 | FFTW → PocketFFT (~30 righe in `spectrum-dsp.cc`) | Niente GPL, una dipendenza in meno |
 | 3 ✅ | `audio-sampler` → miniaudio (fatto) | Cattura identica su Linux/Windows/macOS; nessuna dipendenza a link-time da libpulse/libasound (dlopen a runtime). Verificato su Linux a 48 kHz nativi |
 | 4 | Front-end SDL3 al posto di GTK — **avviato** | `app-sdl.cc` compilato e funzionante su Linux: stessa scena, stessi box trascinabili, stesso OSC, nessun OpenGL. Manca il packaging e la CI |
-| 5 🟡 | CI: `debian:trixie` in container (verde al primo run), `windows-latest` MSYS2 UCRT64, `macos-latest` in un workflow separato | Linux: build, test e AppImage **verdi al primo run**. Windows: sistema di pacchetti corretto dopo il primo run. macOS: **i runner non erano disponibili** (job cancellato dopo 1 s), quindi il workflow è separato, `continue-on-error` e non blocca la release |
+| 5 🟡 | CI: `debian:trixie` in container (verde al primo run), `windows-latest` MSYS2 UCRT64, `macos-latest` in un workflow separato | Linux: build, test e AppImage **verdi al primo run**. Windows: sistema di pacchetti corretto dopo il primo run. macOS: `macos-latest` funziona (le label `macos-14`/`macos-13` non esistono più); il workflow è separato e si allega da solo alla release — verificato su v1.1.0 |
 
 Dopo il passo 3 il codice è già multipiattaforma **tranne la finestra**, il che rende il
 passo 4 un lavoro isolato e non un rifacimento.

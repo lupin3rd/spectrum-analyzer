@@ -5,6 +5,32 @@ All notable changes to this project, newest first.  Versions follow
 bump means "the product changed shape" (a front end removed or replaced), not
 "an API broke".
 
+## [1.1.1] — 2026-10-31
+
+Documentation and packaging only: no code changes.
+
+### Changed
+
+- README rewritten around what a visitor needs: a download table for the three
+  platforms, the controls, per-platform build instructions (Linux, macOS,
+  Windows/MSYS2) and the packaging commands.
+- `docs/RELEASING.md` records the two-repository policy — Gitea keeps the full
+  development history and the agent transcripts, GitHub carries one commit per
+  release — and `scripts/build-public-release.sh` automates it.
+- This repository is now the release repository: the history contains one
+  commit per release instead of the development history.  The full history,
+  including the audit, the SDL 3 front end and the miniaudio migration, lives in
+  the private Gitea instance.
+
+### Fixed
+
+- The README said the Windows build produces a single `.exe`.  It does not:
+  liblo ships no static library in MSYS2, so the download is an `.exe` plus the
+  DLLs it needs.
+- The README described the Windows and macOS CI jobs as "best effort, never
+  executed".  All three platforms are green and the macOS job attaches its own
+  artifact to the release.
+
 ## [1.1.0] — 2026-10-31
 
 The cross-platform release.  Two front ends ship side by side: the GTK 3 one
@@ -73,6 +99,12 @@ for Linux, Windows and macOS.
 - The audio reconnection has not been exercised against a real sound server
   restart.
 
+### Repository layout
+
+The public repository on GitHub carries one commit per release, with the
+development history and the `agent/` transcripts kept in the private Gitea
+repository.  See `docs/RELEASING.md`.
+
 ## [1.0.1] — GTK maintenance line (`1.x` branch)
 
 Everything above from the audit, applied to the GTK-only code base: tray icon,
@@ -85,6 +117,7 @@ Modernized and improved fork of [luz](https://github.com/lighttroupe/luz):
 ported to GTK 3 and modern OpenGL, low-latency PulseAudio/ALSA capture,
 log-spaced analysis from 20 Hz to 20 kHz, OSC output.
 
+[1.1.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...v1.1.0
 [1.0.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...1.x
 [1.0.0]: https://github.com/lupin3rd/spectrum-analyzer/releases/tag/v1.0.0
