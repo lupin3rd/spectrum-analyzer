@@ -7,6 +7,6 @@
 // the packaging scripts read it, and the CI reads it for artifact names, so it
 // must not be duplicated anywhere else.
 
-#define SPECTRUM_ANALYZER_VERSION "1.1.2"
+#define SPECTRUM_ANALYZER_VERSION "1.1.3"
 
 #endif

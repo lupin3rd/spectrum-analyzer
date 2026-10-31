@@ -145,18 +145,19 @@ and [`docs/AUDIT.md`](docs/AUDIT.md) for the state of the code.
 Semantic versioning, with the caveat that this is an application: a major bump
 means the product changed shape (a front end removed), not that an API broke.
 
-| Line | Branch | Content |
+| Line | Where | Content |
 |---|---|---|
-| `1.0.x` | `1.x` | GTK only, for everyone who stays on the desktop GTK build |
-| `1.1.x` | `main` | both front ends, portable audio, packaged for three platforms |
+| `1.0.x` | tag [`v1.0.1`](https://github.com/lupin3rd/spectrum-analyzer/releases/tag/v1.0.1) | GTK only, for everyone who stays on the desktop GTK build |
+| `1.1.x` | branch `main` | both front ends, portable audio, packaged for three platforms |
 
 Whether the GTK front end is dropped in a future 2.0 depends on how 1.1.x is
 received.
 
-This repository (GitHub) is the **release repository**: it carries one commit per
-release.  Development happens on a private Gitea instance, which keeps the full
-history and the coding-agent transcripts; see
-[`docs/RELEASING.md`](docs/RELEASING.md).
+This repository (GitHub) is the **release repository**: it carries a single
+branch (`main`) and one commit per release.  Development — including the `1.0.x`
+maintenance line and its branch — happens on a private Gitea instance, which
+keeps the full history and the coding-agent transcripts; each release, old and
+new, is published here as a tag.  See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Docs
 

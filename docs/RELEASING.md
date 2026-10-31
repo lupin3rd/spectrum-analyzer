@@ -21,6 +21,9 @@ exist only for the local repository** (`agent/`). Nothing else is filtered:
 `docs/`, `tests/`, `packaging/`, `vendor/` and `.github/` all ship, because they
 are needed to build, test and release.
 
+GitHub carries a single branch, `main`.  Maintenance branches (the `1.x` line)
+exist only on Gitea; their releases are published here as tags.
+
 Consequences to keep in mind:
 
 - `gitea/main` is normally **ahead of** `github/main`. That is the point: the

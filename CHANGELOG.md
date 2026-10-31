@@ -5,6 +5,15 @@ All notable changes to this project, newest first.  Versions follow
 bump means "the product changed shape" (a front end removed or replaced), not
 "an API broke".
 
+## [1.1.3] — 2026-10-31
+
+### Changed
+
+- This repository now has a single branch (`main`): the `1.x` and `master`
+  branches were removed, since a release repository does not need them.  The
+  `1.0.x` line is published here as the `v1.0.1` tag and lives as a branch in the
+  development repository, which is what the README and the changelog now say.
+
 ## [1.1.2] — 2026-10-31
 
 ### Fixed
@@ -122,7 +131,7 @@ The public repository on GitHub carries one commit per release, with the
 development history and the `agent/` transcripts kept in the private Gitea
 repository.  See `docs/RELEASING.md`.
 
-## [1.0.1] — GTK maintenance line (`1.x` branch)
+## [1.0.1] — GTK maintenance line
 
 Everything above from the audit, applied to the GTK-only code base: tray icon,
 capture reconnection, ALSA short reads, startup without an audio device, GL
@@ -134,8 +143,9 @@ Modernized and improved fork of [luz](https://github.com/lighttroupe/luz):
 ported to GTK 3 and modern OpenGL, low-latency PulseAudio/ALSA capture,
 log-spaced analysis from 20 Hz to 20 kHz, OSC output.
 
+[1.1.3]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...v1.1.0
-[1.0.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...1.x
+[1.0.1]: https://github.com/lupin3rd/spectrum-analyzer/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/lupin3rd/spectrum-analyzer/releases/tag/v1.0.0
