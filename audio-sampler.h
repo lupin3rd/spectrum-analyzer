@@ -1,34 +1,26 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #ifndef __AUDIO_SAMPLER_H__
 #define __AUDIO_SAMPLER_H__
 
+// Audio capture front end.
+//
+// Two backends are supported today, both Linux only: PulseAudio (which also
+// covers PipeWire through pipewire-pulse) and raw ALSA.  All backend specific
+// types are hidden behind Impl, so this header stays free of <alsa/...> and
+// <pulse/...> and compiles on any platform.  Adding WASAPI/CoreAudio means
+// adding one Impl method pair, not touching the header.
+//
+// The analysis itself lives in spectrum-dsp.h and knows nothing about capture.
+
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#define ALSA_PCM_NEW_HW_PARAMS_API		// use new API
-#include <alsa/asoundlib.h>
-#include <fftw3.h>
-
-#ifdef HAVE_PULSE
-#include <pulse/simple.h>
-#endif
-
-// ---------------------------------------------------------------------------
-// Spectrum analysis configuration
-// ---------------------------------------------------------------------------
-
-#define AUDIO_FFT_SIZE		(4096)		// analysis window, in samples (~93 ms)
-#define AUDIO_MIN_FREQ		(20.0)		// lowest displayed band, Hz
-#define AUDIO_MAX_FREQ		(20000.0)	// highest displayed band, Hz
-#define AUDIO_MIN_DB		(-80.0)		// bottom of the display
-#define AUDIO_MAX_DB		(0.0)		// top of the display (full scale)
-
-// Envelope-follower time constants, in seconds.  Fast attack so transients
-// are visible, slow release so the bars do not flicker.
-#define AUDIO_ATTACK_SECONDS	(0.010)
-#define AUDIO_RELEASE_SECONDS	(0.250)
+#include "spectrum-dsp.h"
 
 // Human-readable description of a capture source (microphone, "Monitor of ...", etc.).
 struct AudioSourceInfo
@@ -42,77 +34,61 @@ class AudioSampler
 {
 public:
 	AudioSampler();
-	virtual ~AudioSampler();
+	~AudioSampler();
+
+	AudioSampler(const AudioSampler&) = delete;
+	AudioSampler& operator=(const AudioSampler&) = delete;
 
 	// List available capture sources.  Prefers PulseAudio when it is
 	// available (it works on both PulseAudio and PipeWire via
 	// pipewire-pulse); otherwise falls back to ALSA device names.
 	static std::vector<AudioSourceInfo> EnumerateSources();
 
-	// Open a capture source.  NULL or "" means "default".
+	// Open a capture source.  "" means "default".
 	// Tries PulseAudio first, then falls back to ALSA.
 	// Capture runs on its own thread, so this never blocks the UI loop.
-	bool Open(const char* source_name);
+	bool Open(const std::string& source_name);
 	void Close();
 
-	bool IsOpen() const;
+	bool IsOpen() const { return m_open.load(); }
 	const char* GetBackendName() const;
+	int NumBars() const { return m_dsp.NumBars(); }
+
+	// Number of times the capture stream had to be reopened because the sound
+	// server or the device disappeared (PipeWire restart, USB unplug, ...).
+	unsigned long ReconnectCount() const { return m_reconnects.load(); }
 
 	// Copy the latest bar magnitudes (thread-safe snapshot) into out[].
+	// Safe to call before Open(): the buffer then holds zeros.
 	void CopyMagnitudes(float* out, int count);
 
 private:
-	bool OpenPulse(const char* source_name);
-	bool OpenAlsa(const char* source_name);
-	void ClosePulse();
-	void CloseAlsa();
-	bool AllocateFftBuffers();
-	void FreeFftBuffers();
+	struct Impl;
 
-	void CaptureLoop();   // runs on the audio thread
-	bool Update();        // one blocking read (audio thread)
-	void Analyze();       // window + FFT + bands -> m_bar_magnitudes (audio thread)
+	enum ReadStatus { READ_OK, READ_RETRY, READ_FATAL };
 
-	enum Backend { BACKEND_NONE, BACKEND_PULSE, BACKEND_ALSA };
-	Backend m_backend;
+	void CaptureLoop();
+	bool OpenBackend(const std::string& source_name);
+	void CloseBackend();
+	ReadStatus ReadBlock();
+	// Sleep for `milliseconds`, returning false early if Close() asked the
+	// capture thread to stop.
+	bool WaitWhileRunning(unsigned milliseconds);
 
-	unsigned int m_rate;
-	snd_pcm_uframes_t m_frame_size;
-	snd_pcm_t* m_alsa;
-	float* m_frame_buffer;
+	std::unique_ptr<Impl> m_impl;
 
-#ifdef HAVE_PULSE
-	pa_simple* m_pulse;
-#endif
-
-	// Overlapping analysis window.  Audio is read in small blocks and pushed
-	// into this sliding buffer; one FFT is run per block on the most recent
-	// AUDIO_FFT_SIZE samples.
-	float* m_window;
-	int m_window_fill;
-
-	// Hann window coefficients and log-spaced band table.
-	double m_hann[AUDIO_FFT_SIZE];
-	std::vector<float> m_band_edges_hz;
-	std::vector<int> m_band_bin_lo;
-	std::vector<int> m_band_bin_hi;
-
-	fftw_plan m_fftw_plan;
-	double* m_fft_in;
-	fftw_complex* m_fft_out;
-
-	float* m_bar_magnitudes;         // shared, smoothed, 0..1
-	std::vector<float> m_raw_magnitudes;  // audio-thread only
-
-	double m_attack_coeff;
-	double m_release_coeff;
-
-	int m_overrun_count;
-	int m_underrun_count;
+	sa::SpectrumDsp m_dsp;
+	std::string m_source_name;
 
 	std::thread m_thread;
 	std::atomic<bool> m_running;
-	std::mutex m_magnitudes_mutex;
+	std::atomic<bool> m_open;
+	std::atomic<unsigned long> m_reconnects;
+
+	// Backend handles are only ever touched by Open()/Close() and by the
+	// capture thread while it owns the stream; this mutex additionally guards
+	// m_dsp against concurrent Configure()/CopyMagnitudes().
+	mutable std::mutex m_mutex;
 };
 
 #endif

@@ -1,3 +1,5 @@
 *.o
 *.d
 spectrum-analyzer
+spectrum-analyzer-asan
+tests/dsp-test

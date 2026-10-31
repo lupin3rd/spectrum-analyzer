@@ -1,39 +1,61 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #include "audio-sampler.h"
-#include "spectrum-analyzer.h"
 
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#if defined(__linux__)
 #include <unistd.h>
+#endif
 
 #ifdef HAVE_PULSE
 #include <pulse/pulseaudio.h>
+#include <pulse/simple.h>
 #endif
 
-#define NUM_CHANNELS (1)
-#define DEFAULT_ALSA_DEVICE_NAME ("default")
-#define PULSE_RATE (44100)
-#define PULSE_FRAME_SIZE (256)
+#if defined(__linux__)
+#define ALSA_PCM_NEW_HW_PARAMS_API		// use new API
+#include <alsa/asoundlib.h>
+#endif
 
-// ---------------------------------------------------------------------------
-// Source enumeration
-// ---------------------------------------------------------------------------
+namespace {
 
-static std::string first_line(const char* s)
+const char* kDefaultAlsaDeviceName = "default";
+
+// Capture format.  44.1 kHz mono float is what the analysis assumes; the sound
+// server resamples transparently if the device runs at another rate.
+const unsigned kCaptureRate = 44100;
+const unsigned kCaptureFrameSize = 256;
+
+// Reconnect policy when the stream dies (sound server restart, device unplug).
+const unsigned kReconnectInitialDelayMs = 100;
+const unsigned kReconnectMaxDelayMs = 2000;
+// Do not spam the log while the source stays unavailable.
+const unsigned long kReconnectLogEvery = 30;
+
+enum BackendId {
+	BACKEND_NONE = 0,
+	BACKEND_PULSE = 1,
+	BACKEND_ALSA = 2
+};
+
+std::string first_line(const char* s)
 {
 	if (!s)
 		return "";
 	std::string str(s);
-	size_t nl = str.find('\n');
+	const size_t nl = str.find('\n');
 	if (nl != std::string::npos)
 		str.erase(nl);
 	return str;
 }
 
 #ifdef HAVE_PULSE
-namespace {
-
 struct PulseEnumState
 {
 	std::vector<AudioSourceInfo>* sources;
@@ -103,7 +125,9 @@ std::vector<AudioSourceInfo> pulse_enumerate_sources()
 	for (int i = 0; i < 2000 && !st.done; i++) {
 		if (pa_mainloop_iterate(ml, 0, NULL) < 0)
 			break;
+#if defined(__linux__)
 		usleep(1000);
+#endif
 	}
 
 	pa_context_disconnect(c);
@@ -112,12 +136,9 @@ std::vector<AudioSourceInfo> pulse_enumerate_sources()
 
 	return sources;
 }
-
-} // anonymous namespace
 #endif // HAVE_PULSE
 
-namespace {
-
+#if defined(__linux__)
 std::vector<AudioSourceInfo> alsa_enumerate_sources()
 {
 	std::vector<AudioSourceInfo> sources;
@@ -134,7 +155,7 @@ std::vector<AudioSourceInfo> alsa_enumerate_sources()
 		if (name && name[0]
 			&& strcmp(name, "null") != 0
 			&& strcmp(name, "default") != 0) {
-			bool is_input = (ioid == NULL)
+			const bool is_input = (ioid == NULL)
 				|| (strcmp(ioid, "Input") == 0)
 				|| (strcmp(ioid, "Input/Output") == 0);
 			if (is_input) {
@@ -154,46 +175,58 @@ std::vector<AudioSourceInfo> alsa_enumerate_sources()
 	snd_device_name_free_hint(hints);
 	return sources;
 }
+#endif // __linux__
 
 } // anonymous namespace
+
+// ---------------------------------------------------------------------------
+// Backend state.  Defined here so no platform header leaks into the interface.
+// ---------------------------------------------------------------------------
+
+struct AudioSampler::Impl
+{
+	std::atomic<int> backend;
+	unsigned rate;
+	unsigned frame_size;			// frames delivered per ReadBlock()
+	std::vector<float> frame_buffer;
+
+#ifdef HAVE_PULSE
+	pa_simple* pulse;
+#endif
+
+#if defined(__linux__)
+	snd_pcm_t* alsa;
+#endif
+
+	Impl()
+		: backend(BACKEND_NONE),
+			rate(kCaptureRate),
+			frame_size(kCaptureFrameSize)
+#ifdef HAVE_PULSE
+			, pulse(NULL)
+#endif
+#if defined(__linux__)
+			, alsa(NULL)
+#endif
+	{
+	}
+};
 
 // ---------------------------------------------------------------------------
 // AudioSampler
 // ---------------------------------------------------------------------------
 
 AudioSampler::AudioSampler()
-	: m_backend(BACKEND_NONE),
-		m_rate(PULSE_RATE),
-		m_frame_size(PULSE_FRAME_SIZE),
-		m_alsa(NULL),
-		m_frame_buffer(NULL),
-#ifdef HAVE_PULSE
-		m_pulse(NULL),
-#endif
-		m_window(NULL),
-		m_window_fill(0),
-		m_fftw_plan(NULL),
-		m_fft_in(NULL),
-		m_fft_out(NULL),
-		m_bar_magnitudes(NULL),
-		m_attack_coeff(1.0),
-		m_release_coeff(1.0),
-		m_overrun_count(0),
-		m_underrun_count(0),
-		m_running(false)
+	: m_impl(new Impl()),
+		m_running(false),
+		m_open(false),
+		m_reconnects(0)
 {
-	// Allocate the magnitude array up-front so CopyMagnitudes() is always
-	// valid, even before a source is opened.
-	m_bar_magnitudes = (float*)calloc(NUM_BARS, sizeof(float));
 }
 
 AudioSampler::~AudioSampler()
 {
 	Close();
-	if (m_bar_magnitudes) {
-		free(m_bar_magnitudes);
-		m_bar_magnitudes = NULL;
-	}
 }
 
 std::vector<AudioSourceInfo> AudioSampler::EnumerateSources()
@@ -207,45 +240,35 @@ std::vector<AudioSourceInfo> AudioSampler::EnumerateSources()
 	sources.push_back(def);
 
 #ifdef HAVE_PULSE
-	std::vector<AudioSourceInfo> pulse_sources = pulse_enumerate_sources();
+	const std::vector<AudioSourceInfo> pulse_sources = pulse_enumerate_sources();
 	if (!pulse_sources.empty()) {
 		sources.insert(sources.end(), pulse_sources.begin(), pulse_sources.end());
 		return sources;
 	}
 #endif
 
-	std::vector<AudioSourceInfo> alsa_sources = alsa_enumerate_sources();
+#if defined(__linux__)
+	const std::vector<AudioSourceInfo> alsa_sources = alsa_enumerate_sources();
 	sources.insert(sources.end(), alsa_sources.begin(), alsa_sources.end());
+#endif
+
 	return sources;
 }
 
-bool AudioSampler::Open(const char* source_name)
+bool AudioSampler::Open(const std::string& source_name)
 {
+	// Stops the capture thread and releases the previous stream first, so the
+	// backend handles below are never shared with a running thread.
 	Close();
+	m_source_name = source_name;
 
-#ifdef HAVE_PULSE
-	if (OpenPulse(source_name)) {
-		m_backend = BACKEND_PULSE;
-		if (!AllocateFftBuffers()) {
-			Close();
-			return false;
-		}
-		printf("Audio backend: PulseAudio (source: %s)\n", (source_name && source_name[0]) ? source_name : "default");
-	}
-	else
-#endif
-	if (OpenAlsa(source_name)) {
-		m_backend = BACKEND_ALSA;
-		if (!AllocateFftBuffers()) {
-			Close();
-			return false;
-		}
-	}
-	else {
+	if (!OpenBackend(source_name)) {
+		fprintf(stderr, "AudioSampler: could not open capture source '%s'\n",
+			source_name.empty() ? "(default)" : source_name.c_str());
 		return false;
 	}
 
-	// Capture runs on its own thread so the UI main loop is never blocked.
+	m_open = true;
 	m_running = true;
 	m_thread = std::thread(&AudioSampler::CaptureLoop, this);
 	return true;
@@ -257,358 +280,307 @@ void AudioSampler::Close()
 	if (m_thread.joinable())
 		m_thread.join();
 
-	ClosePulse();
-	CloseAlsa();
-	FreeFftBuffers();
-	m_backend = BACKEND_NONE;
-}
+	CloseBackend();
+	m_open = false;
 
-bool AudioSampler::IsOpen() const
-{
-	return m_backend != BACKEND_NONE;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_dsp.Reset();
 }
 
 const char* AudioSampler::GetBackendName() const
 {
-	switch (m_backend) {
+	switch (m_impl->backend.load()) {
 		case BACKEND_PULSE: return "PulseAudio";
 		case BACKEND_ALSA:  return "ALSA";
 		default:            return "none";
 	}
 }
 
-void AudioSampler::CaptureLoop()
+bool AudioSampler::OpenBackend(const std::string& source_name)
 {
-	while (m_running) {
-		if (Update())
-			Analyze();
-		else
-			usleep(1000);		// don't spin on read errors
-	}
-}
+	CloseBackend();
 
-bool AudioSampler::OpenPulse(const char* source_name)
-{
+	const char* device = source_name.empty() ? NULL : source_name.c_str();
+
 #ifdef HAVE_PULSE
 	pa_sample_spec ss;
 	ss.format = PA_SAMPLE_FLOAT32LE;
-	ss.rate = PULSE_RATE;
-	ss.channels = NUM_CHANNELS;
-
-	const char* dev = (source_name && source_name[0]) ? source_name : NULL;
+	ss.rate = kCaptureRate;
+	ss.channels = 1;
 
 	// Ask for a low-latency record stream.  With the default (server chosen)
 	// buffer attributes PulseAudio hands the data over in large, bursty
 	// chunks: dozens of reads return instantly and are then followed by a
-	// gap of a few hundred milliseconds.  The analyzer bars therefore freeze
-	// and then jump instead of moving smoothly.  Requesting one fragment per
-	// period (and a small overall buffer) makes the reads arrive at a steady
-	// rate again.
+	// gap of a few hundred milliseconds.  The analyzer bars then freeze and
+	// jump instead of moving smoothly.  Requesting one fragment per period
+	// (and a small overall buffer) makes the reads arrive at a steady rate.
 	pa_buffer_attr attr;
 	attr.tlength   = (uint32_t)-1;   // playback only
 	attr.prebuf    = (uint32_t)-1;   // playback only
 	attr.minreq    = (uint32_t)-1;   // playback only
-	attr.maxlength = (uint32_t)(PULSE_FRAME_SIZE * NUM_CHANNELS * sizeof(float) * 4);
-	attr.fragsize  = (uint32_t)(PULSE_FRAME_SIZE * NUM_CHANNELS * sizeof(float));
+	attr.maxlength = (uint32_t)(kCaptureFrameSize * sizeof(float) * 4);
+	attr.fragsize  = (uint32_t)(kCaptureFrameSize * sizeof(float));
 
 	int error = 0;
-	m_pulse = pa_simple_new(
+	pa_simple* pulse = pa_simple_new(
 		NULL,                          // default server (PulseAudio or pipewire-pulse)
 		"Spectrum Analyzer",           // application name
 		PA_STREAM_RECORD,              // direction
-		dev,                           // source name (NULL = default)
+		device,                        // source name (NULL = default)
 		"Spectrum Analyzer Input",     // stream description
 		&ss,                           // sample format
 		NULL,                          // channel map (default)
 		&attr,                         // low-latency buffer attributes
 		&error);
 
-	if (!m_pulse) {
+	if (!pulse) {
 		// A few servers reject very small buffers.  Rather than giving up on
-		// PulseAudio entirely, retry with the server default; smooth motion
-		// is lost, but capture still works.
-		fprintf(stderr, "PulseAudio: low-latency buffer rejected (%s); retrying with defaults\n", pa_strerror(error));
-		m_pulse = pa_simple_new(
-			NULL, "Spectrum Analyzer", PA_STREAM_RECORD, dev,
+		// PulseAudio entirely, retry with the server default; smooth motion is
+		// lost, but capture still works.
+		fprintf(stderr, "PulseAudio: low-latency buffer rejected (%s); retrying with defaults\n",
+			pa_strerror(error));
+		error = 0;
+		pulse = pa_simple_new(
+			NULL, "Spectrum Analyzer", PA_STREAM_RECORD, device,
 			"Spectrum Analyzer Input", &ss, NULL, NULL, &error);
 	}
 
-	if (!m_pulse) {
-		fprintf(stderr, "PulseAudio: %s\n", pa_strerror(error));
-		return false;
+	if (pulse) {
+		m_impl->pulse = pulse;
+		m_impl->rate = kCaptureRate;
+		m_impl->frame_size = kCaptureFrameSize;
+		m_impl->backend.store(BACKEND_PULSE);
 	}
+#endif // HAVE_PULSE
 
-	m_rate = ss.rate;
-	m_frame_size = PULSE_FRAME_SIZE;
+#if defined(__linux__)
+	if (m_impl->backend.load() == BACKEND_NONE) {
+		snd_pcm_t* handle = NULL;
+		const char* alsa_device = device ? device : kDefaultAlsaDeviceName;
+		unsigned rate = kCaptureRate;
+		snd_pcm_uframes_t frame_size = kCaptureFrameSize;
+		int dir = 0;
+
+		int ret = snd_pcm_open(&handle, alsa_device, SND_PCM_STREAM_CAPTURE, 0);
+		if (ret < 0) {
+			fprintf(stderr, "ALSA: unable to open pcm device '%s': %s\n",
+				alsa_device, snd_strerror(ret));
+		}
+		else {
+			snd_pcm_hw_params_t* params;
+			snd_pcm_hw_params_alloca(&params);
+			snd_pcm_hw_params_any(handle, params);
+
+			snd_pcm_hw_params_set_access(handle, params, SND_PCM_ACCESS_RW_INTERLEAVED);
+			snd_pcm_hw_params_set_format(handle, params, SND_PCM_FORMAT_FLOAT);
+			snd_pcm_hw_params_set_channels(handle, params, 1);
+			snd_pcm_hw_params_set_rate_near(handle, params, &rate, &dir);
+			snd_pcm_hw_params_set_period_size_near(handle, params, &frame_size, &dir);
+
+			ret = snd_pcm_hw_params(handle, params);
+			if (ret < 0) {
+				fprintf(stderr, "ALSA: unable to set hw parameters: %s\n", snd_strerror(ret));
+				snd_pcm_close(handle);
+				handle = NULL;
+			}
+			else {
+				snd_pcm_hw_params_get_period_size(params, &frame_size, &dir);
+				snd_pcm_hw_params_get_rate(params, &rate, &dir);
+
+				if (frame_size == 0)
+					frame_size = kCaptureFrameSize;
+
+				m_impl->alsa = handle;
+				m_impl->rate = rate;
+				m_impl->frame_size = (unsigned)frame_size;
+				m_impl->backend.store(BACKEND_ALSA);
+				printf("ALSA rate: %u, frames: %u\n", rate, (unsigned int)frame_size);
+			}
+		}
+	}
+#endif // __linux__
+
+	if (m_impl->backend.load() == BACKEND_NONE)
+		return false;
+
+	if (m_impl->frame_size == 0)
+		m_impl->frame_size = kCaptureFrameSize;
+	m_impl->frame_buffer.assign(m_impl->frame_size, 0.0f);
+
+	// The DSP hop is one delivered block: one FFT per read, no timer coupling.
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (!m_dsp.Configure(m_impl->rate, (int)m_impl->frame_size)) {
+			CloseBackend();
+			return false;
+		}
+	}
 	return true;
-#else
-	(void)source_name;
-	return false;
-#endif
 }
 
-bool AudioSampler::OpenAlsa(const char* source_name)
-{
-	int ret;
-	int dir = 0;
-
-	const char* device = (source_name && source_name[0]) ? source_name : DEFAULT_ALSA_DEVICE_NAME;
-
-	m_rate = PULSE_RATE;
-	m_frame_size = PULSE_FRAME_SIZE;
-
-	ret = snd_pcm_open(&m_alsa, device, SND_PCM_STREAM_CAPTURE, 0);
-	if (ret < 0) {
-		fprintf(stderr, "ALSA: unable to open pcm device '%s': %s\n", device, snd_strerror(ret));
-		return false;
-	}
-
-	// Get default params
-	snd_pcm_hw_params_t *params;
-	snd_pcm_hw_params_alloca(&params);
-	snd_pcm_hw_params_any(m_alsa, params);
-
-	// Set desired params
-	snd_pcm_hw_params_set_access(m_alsa, params, SND_PCM_ACCESS_RW_INTERLEAVED);
-	snd_pcm_hw_params_set_format(m_alsa, params, SND_PCM_FORMAT_FLOAT);
-	snd_pcm_hw_params_set_channels(m_alsa, params, NUM_CHANNELS);
-	snd_pcm_hw_params_set_rate_near(m_alsa, params, &m_rate, &dir);
-	snd_pcm_hw_params_set_period_size_near(m_alsa, params, &m_frame_size, &dir);
-
-	// Write the parameters to the driver
-	ret = snd_pcm_hw_params(m_alsa, params);
-	if (ret < 0) {
-		fprintf(stderr, "ALSA: unable to set hw parameters: %s\n", snd_strerror(ret));
-		snd_pcm_close(m_alsa);
-		m_alsa = NULL;
-		return false;
-	}
-	snd_pcm_hw_params_get_period_size(params, &m_frame_size, &dir);
-	snd_pcm_hw_params_get_rate(params, &m_rate, &dir);
-
-	printf("ALSA rate: %u, frames: %u\n", m_rate, (unsigned int)m_frame_size);
-	return true;
-}
-
-void AudioSampler::ClosePulse()
+void AudioSampler::CloseBackend()
 {
 #ifdef HAVE_PULSE
-	if (m_pulse) {
-		pa_simple_free(m_pulse);
-		m_pulse = NULL;
+	if (m_impl->pulse) {
+		pa_simple_free(m_impl->pulse);
+		m_impl->pulse = NULL;
 	}
 #endif
+
+#if defined(__linux__)
+	if (m_impl->alsa) {
+		snd_pcm_close(m_impl->alsa);
+		m_impl->alsa = NULL;
+	}
+#endif
+
+	m_impl->backend.store(BACKEND_NONE);
 }
 
-void AudioSampler::CloseAlsa()
+bool AudioSampler::WaitWhileRunning(unsigned milliseconds)
 {
-	if (m_alsa) {
-		snd_pcm_close(m_alsa);
-		m_alsa = NULL;
+	const unsigned kSlice = 25;
+	unsigned waited = 0;
+	while (waited < milliseconds) {
+		if (!m_running.load())
+			return false;
+		const unsigned step = std::min(kSlice, milliseconds - waited);
+		std::this_thread::sleep_for(std::chrono::milliseconds(step));
+		waited += step;
 	}
+	return m_running.load();
 }
 
-bool AudioSampler::AllocateFftBuffers()
+AudioSampler::ReadStatus AudioSampler::ReadBlock()
 {
-	FreeFftBuffers();
+	const int backend = m_impl->backend.load();
+	const unsigned frames = m_impl->frame_size;
 
-	m_frame_buffer = (float*)malloc(m_frame_size * sizeof(float));
-	m_window = (float*)calloc(AUDIO_FFT_SIZE, sizeof(float));
-	m_fft_in = (double*)fftw_malloc(AUDIO_FFT_SIZE * sizeof(double));
-	m_fft_out = (fftw_complex*)fftw_malloc((AUDIO_FFT_SIZE / 2 + 1) * sizeof(fftw_complex));
+	if (frames == 0 || m_impl->frame_buffer.size() < frames)
+		return READ_FATAL;
 
-	if (!m_frame_buffer || !m_window || !m_fft_in || !m_fft_out) {
-		FreeFftBuffers();
-		return false;
-	}
+	float* buffer = &m_impl->frame_buffer[0];
 
-	// Real-to-complex FFT of the analysis window.  FFTW reads m_fft_in and
-	// writes m_fft_out directly, so the buffers are passed here.
-	m_fftw_plan = fftw_plan_dft_r2c_1d(AUDIO_FFT_SIZE, m_fft_in, m_fft_out, FFTW_ESTIMATE);
-	if (!m_fftw_plan) {
-		FreeFftBuffers();
-		return false;
-	}
-
-	// Periodic Hann window: drastically reduces spectral leakage, so a strong
-	// bass tone no longer smears across every bar.
-	static const double pi = 3.14159265358979323846;
-	for (int i = 0; i < AUDIO_FFT_SIZE; i++)
-		m_hann[i] = 0.5 - 0.5 * cos(2.0 * pi * (double)i / (double)AUDIO_FFT_SIZE);
-
-	// Log-spaced band edges from AUDIO_MIN_FREQ up to AUDIO_MAX_FREQ (clamped
-	// to Nyquist).  Equal ratio between adjacent bands, like fractional-octave
-	// bands, which matches how music is perceived.
-	double fmin = AUDIO_MIN_FREQ;
-	double fmax = AUDIO_MAX_FREQ;
-	double nyquist = 0.5 * (double)m_rate;
-	if (fmax > nyquist)
-		fmax = nyquist;
-
-	m_band_edges_hz.resize(NUM_BARS + 1);
-	double ratio = pow(fmax / fmin, 1.0 / (double)NUM_BARS);
-	for (int i = 0; i <= NUM_BARS; i++)
-		m_band_edges_hz[i] = (float)(fmin * pow(ratio, (double)i));
-
-	// Map each band to its FFT bin range.
-	m_band_bin_lo.resize(NUM_BARS);
-	m_band_bin_hi.resize(NUM_BARS);
-	const int half = AUDIO_FFT_SIZE / 2;
-	for (int b = 0; b < NUM_BARS; b++) {
-		double f0 = m_band_edges_hz[b];
-		double f1 = m_band_edges_hz[b + 1];
-		int klo = (int)ceil(f0 * (double)AUDIO_FFT_SIZE / (double)m_rate);
-		int khi = (int)floor(f1 * (double)AUDIO_FFT_SIZE / (double)m_rate);
-		if (klo < 1) klo = 1;
-		if (khi > half) khi = half;
-		if (khi < klo) {
-			// Band narrower than one bin: use the closest single bin.
-			int k = (int)lround(0.5 * (f0 + f1) * (double)AUDIO_FFT_SIZE / (double)m_rate);
-			if (k < 1) k = 1;
-			if (k > half) k = half;
-			klo = khi = k;
-		}
-		m_band_bin_lo[b] = klo;
-		m_band_bin_hi[b] = khi;
-	}
-
-	m_raw_magnitudes.assign(NUM_BARS, 0.0f);
-
-	// Envelope-follower coefficients for the real analysis interval (one FFT
-	// per captured block).
-	double dt = (double)m_frame_size / (double)m_rate;
-	m_attack_coeff = 1.0 - exp(-dt / AUDIO_ATTACK_SECONDS);
-	m_release_coeff = 1.0 - exp(-dt / AUDIO_RELEASE_SECONDS);
-
-	m_window_fill = 0;
-	return true;
-}
-
-void AudioSampler::FreeFftBuffers()
-{
-	if (m_fftw_plan) {
-		fftw_destroy_plan(m_fftw_plan);
-		m_fftw_plan = NULL;
-	}
-	if (m_fft_in) {
-		fftw_free(m_fft_in);
-		m_fft_in = NULL;
-	}
-	if (m_fft_out) {
-		fftw_free(m_fft_out);
-		m_fft_out = NULL;
-	}
-	if (m_window) {
-		free(m_window);
-		m_window = NULL;
-	}
-	if (m_frame_buffer) {
-		free(m_frame_buffer);
-		m_frame_buffer = NULL;
-	}
-	m_window_fill = 0;
-}
-
-bool AudioSampler::Update()
-{
-	if (m_backend == BACKEND_PULSE) {
+	if (backend == BACKEND_PULSE) {
 #ifdef HAVE_PULSE
 		int error = 0;
-		if (pa_simple_read(m_pulse, m_frame_buffer, m_frame_size * sizeof(float), &error) < 0) {
-			fprintf(stderr, "PulseAudio read error: %s\n", pa_strerror(error));
-			return false;
+		if (pa_simple_read(m_impl->pulse, buffer, (size_t)frames * sizeof(float), &error) < 0) {
+			if (m_running.load())
+				fprintf(stderr, "PulseAudio read error: %s\n", pa_strerror(error));
+			return READ_FATAL;
 		}
-		return true;
+		return READ_OK;
 #else
-		return false;
+		return READ_FATAL;
 #endif
 	}
-	else if (m_backend == BACKEND_ALSA) {
-		int ret = snd_pcm_readi(m_alsa, m_frame_buffer, m_frame_size);
-		if (ret == -EPIPE) {
-			// EPIPE means overrun
-			m_overrun_count++;
-			snd_pcm_prepare(m_alsa);
-			return false;
-		} else if (ret < 0) {
-			fprintf(stderr, "ALSA error from read: %s\n", snd_strerror(ret));
-			return false;
-		} else if (ret != (int)m_frame_size) {
-			fprintf(stderr, "ALSA short read, read %d frames\n", ret);
-			return false;
+
+	if (backend == BACKEND_ALSA) {
+#if defined(__linux__)
+		// A short read is normal, not an error: keep asking until the block is
+		// full so the DSP always receives frames == configured hop.
+		unsigned got = 0;
+		while (got < frames) {
+			snd_pcm_sframes_t ret = snd_pcm_readi(m_impl->alsa, buffer + got, frames - got);
+			if (ret == -EPIPE) {
+				// Overrun: the buffer was not read fast enough.  Recover and
+				// drop this block, the next one is fine.
+				snd_pcm_prepare(m_impl->alsa);
+				return READ_RETRY;
+			}
+			if (ret == -ESTRPIPE) {
+				// The device was suspended (e.g. the whole bus slept).
+				if (snd_pcm_resume(m_impl->alsa) < 0)
+					snd_pcm_prepare(m_impl->alsa);
+				return READ_RETRY;
+			}
+			if (ret < 0) {
+				fprintf(stderr, "ALSA error from read: %s\n", snd_strerror((int)ret));
+				return READ_FATAL;
+			}
+			if (ret == 0)
+				return READ_RETRY;
+			got += (unsigned)ret;
 		}
-		return true;
+		return READ_OK;
+#else
+		return READ_FATAL;
+#endif
 	}
-	return false;
+
+	return READ_FATAL;
 }
 
-void AudioSampler::Analyze()
+void AudioSampler::CaptureLoop()
 {
-	if (!m_frame_buffer || !m_window || !m_fft_in || !m_fft_out || !m_bar_magnitudes)
-		return;
+	unsigned delay_ms = kReconnectInitialDelayMs;
+	unsigned long failures = 0;
 
-	// Slide the freshly captured block into the analysis window, dropping the
-	// oldest samples.  With a 256-frame block this is 87.5% overlap, so the
-	// spectrum is recomputed ~172 times per second and moves smoothly.
-	const int n = (int)m_frame_size;
-	if (n >= AUDIO_FFT_SIZE) {
-		memcpy(m_window, m_frame_buffer + (n - AUDIO_FFT_SIZE), AUDIO_FFT_SIZE * sizeof(float));
-		m_window_fill = AUDIO_FFT_SIZE;
-	}
-	else {
-		if (m_window_fill + n > AUDIO_FFT_SIZE) {
-			int drop = m_window_fill + n - AUDIO_FFT_SIZE;
-			memmove(m_window, m_window + drop, (m_window_fill - drop) * sizeof(float));
-			m_window_fill -= drop;
+	while (m_running.load()) {
+		const ReadStatus status = ReadBlock();
+
+		if (status == READ_OK) {
+			if (failures > 0)
+				fprintf(stderr, "AudioSampler: capture recovered after %lu failed attempt(s)\n", failures);
+			failures = 0;
+			delay_ms = kReconnectInitialDelayMs;
+
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_dsp.IsConfigured())
+				m_dsp.Push(&m_impl->frame_buffer[0], m_impl->frame_buffer.size());
+			continue;
 		}
-		memcpy(m_window + m_window_fill, m_frame_buffer, n * sizeof(float));
-		m_window_fill += n;
-	}
 
-	if (m_window_fill < AUDIO_FFT_SIZE)
-		return;		// still filling the very first window
-
-	// Apply the Hann window and transform.
-	for (int i = 0; i < AUDIO_FFT_SIZE; i++)
-		m_fft_in[i] = (double)m_window[i] * m_hann[i];
-
-	fftw_execute(m_fftw_plan);
-
-	// Sum the power in each log band.  Summing (rather than averaging) gives a
-	// flat response for pink noise, i.e. equal energy per octave.
-	//
-	// The 16/N^2 factor calibrates a full-scale (amplitude 1.0) sine, seen
-	// through a Hann window, to roughly 0 dBFS.
-	const double scale = 16.0 / ((double)AUDIO_FFT_SIZE * (double)AUDIO_FFT_SIZE);
-	for (int b = 0; b < NUM_BARS; b++) {
-		double power = 0.0;
-		for (int k = m_band_bin_lo[b]; k <= m_band_bin_hi[b]; k++) {
-			power += m_fft_out[k][0] * m_fft_out[k][0]
-			       + m_fft_out[k][1] * m_fft_out[k][1];
+		if (status == READ_RETRY) {
+			// Transient (ALSA overrun/suspend): the stream is still valid.
+			WaitWhileRunning(2);
+			continue;
 		}
-		power *= scale;
 
-		double db = 10.0 * log10(power + 1e-12);
-		float target = (float)((db - AUDIO_MIN_DB) / (AUDIO_MAX_DB - AUDIO_MIN_DB));
-		if (target < 0.0f) target = 0.0f;
-		if (target > 1.0f) target = 1.0f;
-		m_raw_magnitudes[b] = target;
-	}
+		// READ_FATAL: the sound server or the device went away.  Tear the
+		// stream down and try to reopen it with exponential backoff, so a
+		// PipeWire restart or a replugged interface recovers on its own
+		// instead of freezing the bars forever.
+		++failures;
+		m_open.store(false);
+		CloseBackend();
 
-	// Attack/release envelope follower so the bars move fluidly instead of
-	// flickering with every FFT frame.
-	std::lock_guard<std::mutex> lock(m_magnitudes_mutex);
-	for (int b = 0; b < NUM_BARS; b++) {
-		float& cur = m_bar_magnitudes[b];
-		float target = m_raw_magnitudes[b];
-		double coeff = (target > cur) ? m_attack_coeff : m_release_coeff;
-		cur = (float)(cur + coeff * (target - cur));
+		if (failures == 1 || (failures % kReconnectLogEvery) == 0) {
+			fprintf(stderr, "AudioSampler: capture lost, reconnecting (attempt %lu, retry in %u ms)\n",
+				failures, delay_ms);
+		}
+
+		if (!WaitWhileRunning(delay_ms))
+			break;
+
+		delay_ms = std::min(delay_ms * 2, kReconnectMaxDelayMs);
+
+		if (OpenBackend(m_source_name)) {
+			m_open.store(true);
+			m_reconnects.fetch_add(1);
+			fprintf(stderr, "AudioSampler: reconnected to '%s' (%s)\n",
+				m_source_name.empty() ? "(default)" : m_source_name.c_str(), GetBackendName());
+			failures = 0;
+			delay_ms = kReconnectInitialDelayMs;
+		}
 	}
 }
 
 void AudioSampler::CopyMagnitudes(float* out, int count)
 {
-	std::lock_guard<std::mutex> lock(m_magnitudes_mutex);
-	for (int i = 0; i < count && i < NUM_BARS; i++)
-		out[i] = m_bar_magnitudes[i];
+	if (!out || count <= 0)
+		return;
+
+	std::lock_guard<std::mutex> lock(m_mutex);
+
+	for (int i = 0; i < count; i++)
+		out[i] = 0.0f;
+
+	if (!m_dsp.IsConfigured())
+		return;
+
+	const float* src = m_dsp.Magnitudes();
+	const int n = std::min(count, m_dsp.NumBars());
+	for (int i = 0; i < n; i++)
+		out[i] = src[i];
 }

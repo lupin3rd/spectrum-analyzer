@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #include "gl-compat.h"
 
 #include <epoxy/gl.h>
@@ -26,6 +28,7 @@ float projection[16];
 float modelview[16];
 float* current_matrix = modelview;
 std::vector<std::array<float, 16> > matrix_stack;
+std::vector<char> matrix_stack_mode;
 
 std::vector<Vertex> verts;
 GLenum current_mode = GL_TRIANGLES;
@@ -94,10 +97,18 @@ void draw_vertices(const std::vector<Vertex>& v, GLenum mode)
 
 void init()
 {
-	static bool done = false;
-	if (done)
+	// A GL program belongs to the context that created it.  If the widget is
+	// realized again (window re-shown after a context rebuild, GLArea moved to
+	// another window) the old ids are dangling, so verify instead of trusting a
+	// one-shot flag: a stale program makes the whole canvas render black.
+	if (program != 0 && glIsProgram(program))
 		return;
-	done = true;
+
+	program = 0;
+	vao = 0;
+	vbo = 0;
+	matrix_stack.clear();
+	verts.clear();
 
 	const char* vs =
 		"#version 150\n"
@@ -159,6 +170,49 @@ void init()
 	mat4_identity(modelview);
 }
 
+void shutdown()
+{
+	if (vbo) {
+		glDeleteBuffers(1, &vbo);
+		vbo = 0;
+	}
+	if (vao) {
+		glDeleteVertexArrays(1, &vao);
+		vao = 0;
+	}
+	if (program) {
+		glDeleteProgram(program);
+		program = 0;
+	}
+	u_projection = -1;
+	u_modelview = -1;
+	matrix_stack.clear();
+	matrix_stack_mode.clear();
+	verts.clear();
+}
+
+void blend_alpha()
+{
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void blend_additive()
+{
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+}
+
+void check_errors(const char* where)
+{
+#ifndef NDEBUG
+	GLenum err;
+	int guard = 0;
+	while ((err = glGetError()) != GL_NO_ERROR && guard++ < 8)
+		fprintf(stderr, "glc: GL error 0x%04x at %s\n", (unsigned)err, where ? where : "?");
+#else
+	(void)where;
+#endif
+}
+
 void clear(float r, float g, float b, float a)
 {
 	glClearColor(r, g, b, a);
@@ -177,17 +231,23 @@ void load_identity()
 
 void push_matrix()
 {
+	// Operate on whichever stack is selected, so push/pop pairs stay balanced
+	// even if someone wraps a projection change in them.
 	std::array<float, 16> m;
-	std::memcpy(m.data(), modelview, sizeof(modelview));
+	std::memcpy(m.data(), current_matrix, sizeof(float) * 16);
 	matrix_stack.push_back(m);
+	matrix_stack_mode.push_back(current_matrix == projection ? 1 : 0);
 }
 
 void pop_matrix()
 {
-	if (!matrix_stack.empty()) {
-		std::memcpy(modelview, matrix_stack.back().data(), sizeof(modelview));
-		matrix_stack.pop_back();
-	}
+	if (matrix_stack.empty())
+		return;
+
+	float* target = matrix_stack_mode.back() ? projection : modelview;
+	std::memcpy(target, matrix_stack.back().data(), sizeof(float) * 16);
+	matrix_stack.pop_back();
+	matrix_stack_mode.pop_back();
 }
 
 void translate(float x, float y)

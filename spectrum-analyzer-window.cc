@@ -1,12 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 lupin3rd
 #define WINDOW_TITLE ("Spectrum Analyzer %02d")
 
 #include <gtkmm.h>
 #include <epoxy/gl.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "gl-compat.h"
+#include "math-utils.h"
 #include "spectrum-analyzer.h"
 #include "spectrum-analyzer-window.h"
 
@@ -15,6 +20,14 @@
 
 #define WINDOW_MINIMUM_WIDTH (240)
 #define MSG_CONFIRM_QUIT ("Confirm Quit?")
+
+// Minimum change in activation worth an OSC message.  Without this every bar
+// tick produces 4 packets because the smoothed value always differs in the last
+// decimal, which floods the network and the receiving software for no visible
+// benefit.
+#define OSC_ACTIVATION_DEADBAND (0.002f)
+
+#define ADDRESS_BUFFER_SIZE (200)
 
 static void render_grid(int horizontal, int vertical)
 {
@@ -70,20 +83,24 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 		m_osc_bar(Gtk::ORIENTATION_HORIZONTAL),
 		m_spectrum_analyzer_number_spinbutton(),
 		m_fullscreen_button(),
-		m_filters(),
+		m_audio_sampler(NULL),
 		m_spectrum_analyzer_number(1),
+		m_pointer_tracking(false),
+		m_pointer_x(0.0f),
+		m_pointer_y(0.0f),
 		m_is_fullscreen(false)
 {
-	m_quit_dialog = new Gtk::Dialog(MSG_CONFIRM_QUIT, *this);
+	m_quit_dialog.reset(new Gtk::Dialog(MSG_CONFIRM_QUIT, *this));
 	m_quit_dialog->add_button("_Cancel", Gtk::RESPONSE_CANCEL);
 	m_quit_dialog->add_button("_Quit", Gtk::RESPONSE_OK);
 	m_quit_dialog->set_default_response(Gtk::RESPONSE_CANCEL);
 	m_quit_dialog->signal_response().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_quit_dialog_response));
 
-	m_filters.push_back(new Filter(-0.375, 0.41, (char*)"Red", 1.0, 0.0, 0.0));
-	m_filters.push_back(new Filter(-0.125, 0.41, (char*)"Green", 0.0, 1.0, 0.0));
-	m_filters.push_back(new Filter( 0.125, 0.41, (char*)"Blue", 0.0, 0.0, 1.0));
-	m_filters.push_back(new Filter( 0.375, 0.41, (char*)"Yellow", 1.0, 1.0, 0.0));
+	m_filters.push_back(std::unique_ptr<Filter>(new Filter(-0.375, 0.41, "Red", 1.0, 0.0, 0.0)));
+	m_filters.push_back(std::unique_ptr<Filter>(new Filter(-0.125, 0.41, "Green", 0.0, 1.0, 0.0)));
+	m_filters.push_back(std::unique_ptr<Filter>(new Filter( 0.125, 0.41, "Blue", 0.0, 0.0, 1.0)));
+	m_filters.push_back(std::unique_ptr<Filter>(new Filter( 0.375, 0.41, "Yellow", 1.0, 1.0, 0.0)));
+	m_last_sent_activation.assign(m_filters.size(), -1.0f);
 
 	update_window_title();
 	set_border_width(0);
@@ -120,7 +137,7 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 		);
 
 		// Toolbar: Input source selector (fixed width, ellipsized, full name in tooltip)
-		Gtk::Label* source_label = new Gtk::Label("Source:");
+		Gtk::Label* source_label = Gtk::manage(new Gtk::Label("Source:"));
 		m_toolbar.pack_start(*source_label, false, false);
 
 		m_source_model = Gtk::ListStore::create(m_source_columns);
@@ -136,7 +153,7 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 		populate_sources();
 
 		// Toolbar: spacer to push further items to the far right
-		Gtk::Label* spacer = new Gtk::Label();
+		Gtk::Label* spacer = Gtk::manage(new Gtk::Label());
 		m_toolbar.pack_start(*spacer, true, true);		// booleans mean: expand and fill extra space
 
 		// Toolbar: Fullscreen Button
@@ -165,6 +182,14 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 	m_drawing_area.add_events(Gdk::BUTTON_RELEASE_MASK);
 	m_drawing_area.signal_button_release_event().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_drawing_area_button_press_event), false);
 
+	// Pointer leaving the canvas must not leave a stale delta behind: the next
+	// motion event would otherwise jump by the distance travelled outside.
+	m_drawing_area.add_events(Gdk::LEAVE_NOTIFY_MASK);
+	m_drawing_area.signal_leave_notify_event().connect([this](GdkEventCrossing*) {
+		m_pointer_tracking = false;
+		return false;
+	}, false);
+
 	//
 	// OSC output bar, at the bottom of the window
 	//
@@ -175,12 +200,12 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 	m_osc_bar.set_margin_end(STANDARD_WIDGET_SPACING);
 
 		// OSC: destination IP / host
-		Gtk::Label* osc_label = new Gtk::Label("OSC:");
+		Gtk::Label* osc_label = Gtk::manage(new Gtk::Label("OSC:"));
 		m_osc_bar.pack_start(*osc_label, false, false);
 
 		m_osc_host_entry.set_text(DEFAULT_OSC_HOST);
 		m_osc_host_entry.set_width_chars(8);
-		m_osc_host_entry.set_tooltip_text("Destination IP / host for OSC messages");
+		m_osc_host_entry.set_tooltip_text("Destination IP / host for OSC messages (Enter to apply)");
 		m_osc_bar.pack_start(m_osc_host_entry, false, false);
 
 		// OSC: destination UDP port
@@ -190,14 +215,24 @@ SpectrumAnalyzerWindow::SpectrumAnalyzerWindow()
 		m_osc_port_spinbutton.set_tooltip_text("Destination UDP port for OSC messages");
 		m_osc_bar.pack_start(m_osc_port_spinbutton, false, false);
 
-		m_osc_host_entry.signal_changed().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_osc_destination_changed));
+		// The port is cheap to apply (no name lookup), the host is not: applying
+		// it per keystroke used to resolve a hostname on the UI thread each time.
 		m_osc_port_spinbutton.signal_value_changed().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_osc_destination_changed));
+		m_osc_host_entry.signal_activate().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_osc_host_activate));
+		m_osc_host_entry.add_events(Gdk::FOCUS_CHANGE_MASK);
+		m_osc_host_entry.signal_focus_out_event().connect(sigc::mem_fun(*this, &SpectrumAnalyzerWindow::on_osc_host_focus_out));
 
 		// keep the controls left-aligned
-		Gtk::Label* osc_spacer = new Gtk::Label();
+		Gtk::Label* osc_spacer = Gtk::manage(new Gtk::Label());
 		m_osc_bar.pack_start(*osc_spacer, true, true);
 
+		m_status_label.set_ellipsize(Pango::ELLIPSIZE_END);
+		m_status_label.set_tooltip_text("Audio backend state");
+		m_osc_bar.pack_end(m_status_label, false, false);
+
 	m_window_vbox.pack_start(m_osc_bar, false, false);
+
+	update_status_label();
 }
 
 bool SpectrumAnalyzerWindow::on_window_state_event(GdkEventWindowState* event)
@@ -223,7 +258,7 @@ void SpectrumAnalyzerWindow::on_spectrum_analyzer_number_spinbox_changed()
 void SpectrumAnalyzerWindow::update_window_title()
 {
 	char buffer[201];
-	snprintf(buffer, 200, WINDOW_TITLE, m_spectrum_analyzer_number);
+	snprintf(buffer, sizeof(buffer), WINDOW_TITLE, m_spectrum_analyzer_number);
 	set_title(buffer);
 }
 
@@ -262,32 +297,64 @@ void SpectrumAnalyzerWindow::on_source_changed()
 	Glib::ustring id = (*iter)[m_source_columns.m_id];
 	const char* source = (id.empty() || id == "default") ? NULL : id.c_str();
 
-	if (!m_audio_sampler->Open(source)) {
+	if (!m_audio_sampler->Open(source ? std::string(source) : std::string())) {
 		fprintf(stderr, "ERROR: could not open source '%s'; falling back to default\n", source ? source : "default");
-		if (!m_audio_sampler->Open(NULL)) {
+		if (!m_audio_sampler->Open(std::string())) {
 			fprintf(stderr, "ERROR: could not open the default source either\n");
 		}
 		// Reflect the fallback in the UI (row 0 is always "Default").
 		if (m_source_combo.get_active_row_number() != 0)
 			m_source_combo.set_active(0);
 	}
+
+	update_status_label();
+}
+
+void SpectrumAnalyzerWindow::update_status_label()
+{
+	if (!m_audio_sampler) {
+		m_status_label.set_text("");
+		return;
+	}
+
+	const unsigned long reconnects = m_audio_sampler->ReconnectCount();
+	char buffer[96];
+	if (m_audio_sampler->IsOpen()) {
+		if (reconnects > 0)
+			snprintf(buffer, sizeof(buffer), "%s (reconnects: %lu)",
+				m_audio_sampler->GetBackendName(), reconnects);
+		else
+			snprintf(buffer, sizeof(buffer), "%s", m_audio_sampler->GetBackendName());
+	}
+	else {
+		snprintf(buffer, sizeof(buffer), "no audio input");
+	}
+	// Called once per frame: only touch the widget when the text actually
+	// changes, otherwise GTK relayouts the bar 60 times a second for nothing.
+	if (m_status_label.get_text() != Glib::ustring(buffer))
+		m_status_label.set_text(buffer);
 }
 
 bool SpectrumAnalyzerWindow::on_motion_notify_event(GdkEventMotion* event)
 {
-	static float last_x=0.0, last_y=0.0;
+	const Gtk::Allocation allocation = m_drawing_area.get_allocation();
+	if (allocation.get_width() <= 0 || allocation.get_height() <= 0)
+		return true;
 
-	Gtk::Allocation allocation = m_drawing_area.get_allocation();
-	float x = ((float)event->x / (float)allocation.get_width()) - 0.5;
-	float y = -(((float)event->y / (float)allocation.get_height()) - 0.5);
+	const float x = ((float)event->x / (float)allocation.get_width()) - 0.5f;
+	const float y = -(((float)event->y / (float)allocation.get_height()) - 0.5f);
 
-	vector<Filter*>::iterator itFilter = m_filters.begin();
-	for(; itFilter < m_filters.end(); itFilter++) {
-		Filter* filter = *itFilter;
-		filter->PointerMovement(x, y, (x - last_x), (y - last_y));
-	}
+	// First motion after entering the canvas has no meaningful previous
+	// position: start from "no movement" instead of a huge delta.
+	const float delta_x = m_pointer_tracking ? (x - m_pointer_x) : 0.0f;
+	const float delta_y = m_pointer_tracking ? (y - m_pointer_y) : 0.0f;
 
-	last_x = x; last_y = y;
+	for (size_t i = 0; i < m_filters.size(); i++)
+		m_filters[i]->PointerMovement(x, y, delta_x, delta_y);
+
+	m_pointer_x = x;
+	m_pointer_y = y;
+	m_pointer_tracking = true;
 	return true;
 }
 
@@ -302,27 +369,30 @@ bool SpectrumAnalyzerWindow::on_window_button_press_event(GdkEventButton* event)
 
 bool SpectrumAnalyzerWindow::on_drawing_area_button_press_event(GdkEventButton* event)
 {
-	Gtk::Allocation allocation = m_drawing_area.get_allocation();
+	const Gtk::Allocation allocation = m_drawing_area.get_allocation();
+	if (allocation.get_width() <= 0 || allocation.get_height() <= 0)
+		return true;
 
-	vector<Filter*>::iterator itFilter = m_filters.begin();
+	const float x = ((float)event->x / (float)allocation.get_width()) - 0.5f;
+	const float y = -(((float)event->y / (float)allocation.get_height()) - 0.5f);
+
 	if(event->type == GDK_BUTTON_PRESS) {
-		for(; itFilter < m_filters.end(); itFilter++) {
-			Filter* filter = *itFilter;
-			if(filter->PointerPress(event->button, ((float)event->x / (float)allocation.get_width()) - 0.5, -(((float)event->y / (float)allocation.get_height()) - 0.5)))
+		m_pointer_tracking = false;		// delta restarts from this press
+		for (size_t i = 0; i < m_filters.size(); i++) {
+			if (m_filters[i]->PointerPress(event->button, x, y))
 				break;
 		}
 		return true;
 	}
-	else if(event->type == GDK_BUTTON_RELEASE) {
-		for(; itFilter < m_filters.end(); itFilter++) {
-			Filter* filter = *itFilter;
-			filter->PointerRelease(event->button, ((float)event->x / (float)allocation.get_width()) - 0.5, -(((float)event->y / (float)allocation.get_height()) - 0.5));
-		}
+
+	if(event->type == GDK_BUTTON_RELEASE) {
+		for (size_t i = 0; i < m_filters.size(); i++)
+			m_filters[i]->PointerRelease(event->button, x, y);
+		m_pointer_tracking = false;
 		return true;
 	}
-	else {
-		return false;
-	}
+
+	return false;
 }
 
 bool SpectrumAnalyzerWindow::on_drawing_area_render(const Glib::RefPtr<Gdk::GLContext>&)
@@ -331,43 +401,69 @@ bool SpectrumAnalyzerWindow::on_drawing_area_render(const Glib::RefPtr<Gdk::GLCo
 	return true;
 }
 
-void SpectrumAnalyzerWindow::draw()
+bool SpectrumAnalyzerWindow::should_render() const
 {
-	glClear(GL_COLOR_BUFFER_BIT);
+	if (!get_visible())
+		return false;
 
-	float magnitudes[NUM_BARS];
-	m_audio_sampler->CopyMagnitudes(magnitudes, NUM_BARS);
+	Glib::RefPtr<Gdk::Window> gdk_window = const_cast<SpectrumAnalyzerWindow*>(this)->get_window();
+	if (!gdk_window)
+		return false;
 
-	render_samples(magnitudes, NUM_BARS);
-	render_grid(NUM_HORIZONTAL_LINES, NUM_VERTICAL_LINES);
-
-	// Render boxes
-	vector<Filter*>::iterator itFilter = m_filters.begin();
-	for(; itFilter < m_filters.end(); itFilter++) {
-		Filter* filter = *itFilter;
-		filter->Render();
-	}
+	return (gdk_window->get_state() & GDK_WINDOW_STATE_ICONIFIED) == 0;
 }
 
-#define ADDRESS_BUFFER_SIZE (200)
+void SpectrumAnalyzerWindow::draw()
+{
+	float magnitudes[sa::kNumBars];
+	if (m_audio_sampler)
+		m_audio_sampler->CopyMagnitudes(magnitudes, sa::kNumBars);
+	else
+		std::memset(magnitudes, 0, sizeof(magnitudes));
+
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	// Every primitive states the blend mode it needs, so the picture no longer
+	// depends on what was drawn last (the filter boxes used to leak additive
+	// blending into the bars of the next frame).
+	glc::blend_alpha();
+	render_samples(magnitudes, sa::kNumBars);
+	render_grid(NUM_HORIZONTAL_LINES, NUM_VERTICAL_LINES);
+
+	for (size_t i = 0; i < m_filters.size(); i++)
+		m_filters[i]->Render();
+
+	glc::blend_alpha();
+	glc::check_errors("frame");
+}
 
 bool SpectrumAnalyzerWindow::update()
 {
-	char address_buffer[ADDRESS_BUFFER_SIZE+1];
+	if (!m_audio_sampler)
+		return true;
 
-	float magnitudes[NUM_BARS];
-	m_audio_sampler->CopyMagnitudes(magnitudes, NUM_BARS);
+	float magnitudes[sa::kNumBars];
+	m_audio_sampler->CopyMagnitudes(magnitudes, sa::kNumBars);
 
-	vector<Filter*>::iterator itFilter = m_filters.begin();
-	for(; itFilter < m_filters.end(); itFilter++) {
-		Filter* filter = *itFilter;
+	char address_buffer[ADDRESS_BUFFER_SIZE + 1];
+
+	for (size_t i = 0; i < m_filters.size() && i < m_last_sent_activation.size(); i++) {
+		Filter* filter = m_filters[i].get();
 
 		// Update returns 'true' if activation value changed
-		if(filter->Update(magnitudes, NUM_BARS)) {
-			snprintf(address_buffer, ADDRESS_BUFFER_SIZE, "/spectrum-analyzer/%02d/%s", m_spectrum_analyzer_number, filter->GetName());
-			send_float_packet(address_buffer, filter->GetActivation());
-		}
+		filter->Update(magnitudes, sa::kNumBars);
+
+		const float value = filter->GetActivation();
+		if (std::fabs(value - m_last_sent_activation[i]) < OSC_ACTIVATION_DEADBAND)
+			continue;
+
+		m_last_sent_activation[i] = value;
+		snprintf(address_buffer, sizeof(address_buffer), "/spectrum-analyzer/%02d/%s",
+			m_spectrum_analyzer_number, filter->GetName());
+		send_float_packet(address_buffer, value);
 	}
+
+	update_status_label();
 	return true;
 }
 
@@ -378,15 +474,29 @@ void SpectrumAnalyzerWindow::trigger_redraw()
 
 void SpectrumAnalyzerWindow::on_osc_destination_changed()
 {
-	if(!g_message_bus)
+	if (!g_message_bus)
 		return;
 
 	char port[16];
 	snprintf(port, sizeof(port), "%d", m_osc_port_spinbutton.get_value_as_int());
-	g_message_bus->set_destination(m_osc_host_entry.get_text().c_str(), port);
+	if (!g_message_bus->set_destination(m_osc_host_entry.get_text().c_str(), port))
+		m_osc_host_entry.set_tooltip_text("Invalid OSC destination");
+	else
+		m_osc_host_entry.set_tooltip_text("Destination IP / host for OSC messages (Enter to apply)");
 }
 
-bool SpectrumAnalyzerWindow::on_delete_event(GdkEventAny *event)
+void SpectrumAnalyzerWindow::on_osc_host_activate()
+{
+	on_osc_destination_changed();
+}
+
+bool SpectrumAnalyzerWindow::on_osc_host_focus_out(GdkEventFocus*)
+{
+	on_osc_destination_changed();
+	return false;
+}
+
+bool SpectrumAnalyzerWindow::on_delete_event(GdkEventAny*)
 {
 	m_quit_dialog->show();
 	return true;
